@@ -1,0 +1,15 @@
+[project]
+name = "CROUStillantData"
+version = "0.1.0"
+description = "CROUStillant, tracking the french universities restaurants menus"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "asyncpg>=0.30.0",
+    "python-dotenv>=1.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.1",
+]
