@@ -134,6 +134,16 @@ WHERE ratelimit_limit >= 0 AND status = 500
 WITH DATA;
 
 
+-- Vue pour les status 503
+CREATE MATERIALIZED VIEW IF NOT EXISTS v_gf_status_503 AS
+SELECT 
+    1 AS id,
+    COUNT(*) AS "Total"
+FROM requests_logs
+WHERE ratelimit_limit >= 0 AND status = 503
+WITH DATA;
+
+
 -- Vue pour les requêtes avec une clé API
 CREATE MATERIALIZED VIEW IF NOT EXISTS v_gf_requests_with_key AS
 SELECT 
@@ -202,7 +212,8 @@ SELECT
     COUNT(*) FILTER (WHERE status = '404') AS "404",
     COUNT(*) FILTER (WHERE status = '405') AS "405",
     COUNT(*) FILTER (WHERE status = '429') AS "429",
-    COUNT(*) FILTER (WHERE status = '500') AS "500"
+    COUNT(*) FILTER (WHERE status = '500') AS "500",
+    COUNT(*) FILTER (WHERE status = '503') AS "503"
 FROM requests_logs
 WHERE ratelimit_limit >= 0
 WITH DATA;
@@ -361,6 +372,17 @@ GROUP BY DATE_TRUNC('day', created_at)
 WITH DATA;
 
 
+-- Vue pour le status 503 quotidien
+CREATE MATERIALIZED VIEW IF NOT EXISTS v_gf_daily_status_503 AS
+SELECT 
+    DATE_TRUNC('day', created_at) AS "Jour",
+    COUNT(*) AS "503"
+FROM requests_logs
+WHERE ratelimit_limit >= 0 AND status = 503
+GROUP BY DATE_TRUNC('day', created_at)
+WITH DATA;
+
+
 -- Vue pour le temps de traitement moyen horaire
 CREATE MATERIALIZED VIEW IF NOT EXISTS v_gf_hourly_process_time AS
 SELECT 
@@ -411,6 +433,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_unique_ips_id ON v_gf_unique_ips (id)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_status_200_id ON v_gf_status_200 (id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_status_404_id ON v_gf_status_404 (id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_status_500_id ON v_gf_status_500 (id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_status_503_id ON v_gf_status_503 (id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_requests_with_key_id ON v_gf_requests_with_key (id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_max_ratelimit_used_id ON v_gf_max_ratelimit_used (id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_avg_ratelimit_used_id ON v_gf_avg_ratelimit_used (id);
@@ -432,6 +455,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_daily_status_404_jour ON v_gf_daily_s
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_daily_status_405_jour ON v_gf_daily_status_405 ("Jour");
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_daily_status_429_jour ON v_gf_daily_status_429 ("Jour");
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_daily_status_500_jour ON v_gf_daily_status_500 ("Jour");
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_daily_status_503_jour ON v_gf_daily_status_503 ("Jour");
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_hourly_process_time_heure ON v_gf_hourly_process_time ("Heure");
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_hourly_under_200ms_hour ON v_gf_hourly_under_200ms ("Hour");
 CREATE UNIQUE INDEX IF NOT EXISTS idx_v_gf_requests_by_method_method ON v_gf_requests_by_method ("Method");
