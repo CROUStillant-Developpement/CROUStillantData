@@ -61,17 +61,24 @@ class Analytics:
 
         print(f"Found {len(distinct_cities)} distinct cities to geodecode.")
 
+        distinct_cities_with_user_count = []
         for city in distinct_cities:
-            if not any(geo_record for geo_record in self.df_pool if geo_record.get("CITY") == city):
-                print(f"Geodecoding city: {city}")
-                await self.geodecode(city)
+            user_count = sum(1 for record in self.df_analytics_pool if record.get("city") == city)
+            distinct_cities_with_user_count.append((city, user_count))
 
-    async def geodecode(self, city: str) -> None:
+        for city, users in distinct_cities_with_user_count:
+            if not any(geo_record for geo_record in self.df_pool if geo_record.get("CITY") == city):
+                print(f"Geodecoding city: {city} ({users} users)")
+                await self.geodecode(city, users)
+
+    async def geodecode(self, city: str, users: int) -> None:
         """
         Geodecode a city to get its geographical information.
 
         :param city: The city name to geodecode.
         :type city: str
+        :param users: The number of users from this city.
+        :type users: int
         """
         try:
             async with self.session.get(
@@ -83,9 +90,9 @@ class Analytics:
             print(f"Error geodecoding city {city}: {e}")
         else:
             if data["features"]:
-                self.insert_geo_data(data["features"][0], city)
+                self.insert_geo_data(data["features"][0], city, users)
 
-    async def insert_geo_data(self, feature: dict, city: str) -> None:
+    async def insert_geo_data(self, feature: dict, city: str, users: int) -> None:
         """
         Insert geographical data into the GEO_DATA table.
         
@@ -93,6 +100,8 @@ class Analytics:
         :type feature: dict
         :param city: The city name.
         :type city: str
+        :param users: The number of users from this city.
+        :type users: int
         """
         properties = feature.get("properties", {})
         country_code = properties.get("countrycode", "")
@@ -108,13 +117,14 @@ class Analytics:
 
             await connection.execute(
                 """
-                INSERT INTO GEO_DATA (COUNTRY_CODE, REGION, CITY, LATITUDE, LONGITUDE)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO GEO_DATA (COUNTRY_CODE, REGION, CITY, LATITUDE, LONGITUDE, USER_COUNT)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (CITY) DO NOTHING;
                 """,
                 country_code,
                 region,
                 city,
                 latitude,
-                longitude
+                longitude,
+                users
             )
