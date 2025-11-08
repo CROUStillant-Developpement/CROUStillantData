@@ -76,14 +76,14 @@ class Analytics:
         try:
             async with self.session.get(
                 self.photon_api_url,
-                params={"q": city, "limit": 1}
+                params={"q": str(city), "limit": 1}
             ) as response:
                 data = await response.json()
-
-            if data["features"]:
-                self.insert_geo_data(data["features"][0], city)
         except Exception as e:
             print(f"Error geodecoding city {city}: {e}")
+        else:
+            if data["features"]:
+                self.insert_geo_data(data["features"][0], city)
 
     async def insert_geo_data(self, feature: dict, city: str) -> None:
         """
@@ -95,25 +95,25 @@ class Analytics:
         :type city: str
         """
         properties = feature.get("properties", {})
-        country_code = properties.get("countrycode", "")[:2]
-        region_code = properties.get("statecode", "")[:6]
+        country_code = properties.get("countrycode", "")
+        region = properties.get("state", "")
         coordinates = feature.get("geometry", {}).get("coordinates", [0.0, 0.0])
         longitude = coordinates[0]
         latitude = coordinates[1]
 
-        print(f"Inserting GEO data for city: {city}, Country: {country_code}, Region: {region_code}, Lat: {latitude}, Lon: {longitude}")
+        print(f"Inserting GEO data for city: {city}, Country: {country_code}, Region: {region}, Lat: {latitude}, Lon: {longitude}")
 
         async with self.pool.acquire() as connection:
             connection: Connection
 
             await connection.execute(
                 """
-                INSERT INTO GEO_DATA (COUNTRY_CODE, REGION_CODE, CITY, LATITUDE, LONGITUDE)
+                INSERT INTO GEO_DATA (COUNTRY_CODE, REGION, CITY, LATITUDE, LONGITUDE)
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (COUNTRY_CODE) DO NOTHING;
+                ON CONFLICT (CITY) DO NOTHING;
                 """,
                 country_code,
-                region_code,
+                region,
                 city,
                 latitude,
                 longitude
