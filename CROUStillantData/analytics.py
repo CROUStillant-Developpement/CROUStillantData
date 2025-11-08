@@ -56,7 +56,9 @@ class Analytics:
 
         for record in self.df_analytics_pool:
             city = record.get("city")
-            if city and city != "":
+            # Limiting to France for now
+            # Our Geodecode API is only configured for France for the moment
+            if city and city != "" and record.get("country") == "FR":
                 distinct_cities.add(city)
 
         print(f"Found {len(distinct_cities)} distinct cities to geodecode.")
@@ -90,7 +92,7 @@ class Analytics:
             print(f"Error geodecoding city {city}: {e}")
         else:
             if data["features"]:
-                self.insert_geo_data(data["features"][0], city, users)
+                await self.insert_geo_data(data["features"][0], city, users)
 
     async def insert_geo_data(self, feature: dict, city: str, users: int) -> None:
         """
