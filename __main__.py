@@ -58,6 +58,10 @@ async def main():
 
     await analytics.process()
 
+    await session.close()
+    await pool.close()
+    await analytics_pool.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
