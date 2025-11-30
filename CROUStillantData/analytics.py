@@ -64,7 +64,7 @@ class Analytics:
         print(f"Found {len(distinct_cities)} distinct cities to geodecode.")
 
         for city in distinct_cities:
-            if not any(geo_record for geo_record in self.df_pool if geo_record.get("CITY") == city):
+            if not any(geo_record for geo_record in self.df_pool if geo_record.get("city") == city):
                 print(f"Geodecoding city: {city}")
                 await self.geodecode(city)
 
