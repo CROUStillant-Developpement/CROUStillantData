@@ -54,7 +54,8 @@ class Worker:
             with open(self.LAST_REFRESH_FILE, "r", encoding="utf-8") as file:
                 data = load(file)
             return {view: datetime.fromisoformat(ts) for view, ts in data.items()}
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as e:
+            print(f"Avertissement: fichier last_refresh.json corrompu ({e}), réinitialisation")
             return {}
 
 
