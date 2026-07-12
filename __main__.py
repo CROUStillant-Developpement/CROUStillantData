@@ -33,7 +33,6 @@ async def main():
     )
     await worker.run()
 
-
     # Process analytics geo data
     session = ClientSession()
 
@@ -53,7 +52,7 @@ async def main():
         pool=pool,
         analytics_pool=analytics_pool,
         websites_ids=environ["WEBSITES_IDS"].split(","),
-        photon_api=environ.get("PHOTON_API_URL")
+        photon_api=environ.get("PHOTON_API_URL"),
     )
 
     await analytics.process()

@@ -10,11 +10,9 @@ class Worker:
     LAST_REFRESH_FILE = "/CROUStillantData/last_refresh.json"
 
     # Valid view name pattern (PostgreSQL identifier)
-    VIEW_NAME_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+    VIEW_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
-    def __init__(
-        self, pool: Pool
-    ) -> None:
+    def __init__(self, pool: Pool) -> None:
         """
         Constructeur de la classe Worker.
 
@@ -25,7 +23,6 @@ class Worker:
 
         self.views_ref = self.__load_referential()
         self.last_refresh = self.__load_last_refresh()
-
 
     def __load_referential(self) -> dict[str, int]:
         """
@@ -38,7 +35,6 @@ class Worker:
             referential = load(file)
 
         return referential
-
 
     def __load_last_refresh(self) -> dict[str, datetime]:
         """
@@ -55,9 +51,10 @@ class Worker:
                 data = load(file)
             return {view: datetime.fromisoformat(ts) for view, ts in data.items()}
         except (ValueError, KeyError) as e:
-            print(f"Avertissement: fichier last_refresh.json corrompu ({e}), réinitialisation")
+            print(
+                f"Avertissement: fichier last_refresh.json corrompu ({e}), réinitialisation"
+            )
             return {}
-
 
     def __save_last_refresh(self) -> None:
         """
@@ -66,7 +63,6 @@ class Worker:
         data = {view: ts.isoformat() for view, ts in self.last_refresh.items()}
         with open(self.LAST_REFRESH_FILE, "w", encoding="utf-8") as file:
             dump(data, file, indent=4)
-
 
     def __is_valid_view_name(self, view: str) -> bool:
         """
@@ -78,7 +74,6 @@ class Worker:
         :rtype: bool
         """
         return bool(self.VIEW_NAME_PATTERN.match(view))
-
 
     def __should_refresh(self, view: str, interval_minutes: int) -> bool:
         """
@@ -99,7 +94,6 @@ class Worker:
 
         return now - last_refresh >= timedelta(minutes=interval_minutes)
 
-
     async def run(self) -> None:
         """
         Fonction principale du worker.
@@ -116,15 +110,23 @@ class Worker:
                     continue
 
                 if not self.__should_refresh(view, interval_minutes):
-                    print(f"Vue {view} non rafraîchie (intervalle: {interval_minutes} min)")
+                    print(
+                        f"Vue {view} non rafraîchie (intervalle: {interval_minutes} min)"
+                    )
                     skipped_count += 1
                     continue
 
-                print(f"Raffraîchissement de la vue matérialisée {view} (intervalle: {interval_minutes} min)...")
+                print(
+                    f"Raffraîchissement de la vue matérialisée {view} (intervalle: {interval_minutes} min)..."
+                )
 
-                await connection.execute(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view};")
+                await connection.execute(
+                    f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view};"
+                )
                 self.last_refresh[view] = datetime.now()
                 refreshed_count += 1
 
         self.__save_last_refresh()
-        print(f"Raffraîchissement terminé. {refreshed_count} vue(s) rafraîchie(s), {skipped_count} vue(s) ignorée(s).")
+        print(
+            f"Raffraîchissement terminé. {refreshed_count} vue(s) rafraîchie(s), {skipped_count} vue(s) ignorée(s)."
+        )

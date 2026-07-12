@@ -3,7 +3,14 @@ from asyncpg import Pool, Connection
 
 
 class Analytics:
-    def __init__(self, session: ClientSession, pool: Pool, analytics_pool: Pool, websites_ids: list[int], photon_api: str) -> None:
+    def __init__(
+        self,
+        session: ClientSession,
+        pool: Pool,
+        analytics_pool: Pool,
+        websites_ids: list[int],
+        photon_api: str,
+    ) -> None:
         """
         Initialise the Analytics class.
 
@@ -40,11 +47,16 @@ class Analytics:
         async with self.analytics_pool.acquire() as connection:
             connection: Connection
 
-            records = await connection.fetch("SELECT * FROM session WHERE website_id = ANY($1) AND CITY IS NOT NULL;", self.websites_ids)
+            records = await connection.fetch(
+                "SELECT * FROM session WHERE website_id = ANY($1) AND CITY IS NOT NULL;",
+                self.websites_ids,
+            )
             self.df_analytics_pool = [dict(record) for record in records]
 
         print(f"Loaded {len(self.df_pool)} records from GEO_DATA.")
-        print(f"Loaded {len(self.df_analytics_pool)} records from analytics session table.")
+        print(
+            f"Loaded {len(self.df_analytics_pool)} records from analytics session table."
+        )
 
     async def process(self) -> None:
         """
@@ -64,7 +76,11 @@ class Analytics:
         print(f"Found {len(distinct_cities)} distinct cities to geodecode.")
 
         for city in distinct_cities:
-            if not any(geo_record for geo_record in self.df_pool if geo_record.get("city") == city):
+            if not any(
+                geo_record
+                for geo_record in self.df_pool
+                if geo_record.get("city") == city
+            ):
                 print(f"Geodecoding city: {city}")
                 await self.geodecode(city)
 
@@ -77,8 +93,7 @@ class Analytics:
         """
         try:
             async with self.session.get(
-                self.photon_api_url,
-                params={"q": str(city), "limit": 1}
+                self.photon_api_url, params={"q": str(city), "limit": 1}
             ) as response:
                 data = await response.json()
         except Exception as e:
@@ -90,7 +105,7 @@ class Analytics:
     async def insert_geo_data(self, feature: dict, city: str) -> None:
         """
         Insert geographical data into the GEO_DATA table.
-        
+
         :param feature: The feature dictionary from the photon API response.
         :type feature: dict
         :param city: The city name.
@@ -103,7 +118,9 @@ class Analytics:
         longitude = coordinates[0]
         latitude = coordinates[1]
 
-        print(f"Inserting GEO data for city: {city}, Country: {country_code}, Region: {region}, Lat: {latitude}, Lon: {longitude}")
+        print(
+            f"Inserting GEO data for city: {city}, Country: {country_code}, Region: {region}, Lat: {latitude}, Lon: {longitude}"
+        )
 
         async with self.pool.acquire() as connection:
             connection: Connection
@@ -118,5 +135,5 @@ class Analytics:
                 region,
                 city,
                 latitude,
-                longitude
+                longitude,
             )
