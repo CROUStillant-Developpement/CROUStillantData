@@ -1,6 +1,7 @@
 import asyncio
 
 from CROUStillantData.worker import Worker
+from CROUStillantData.stats_aggregator import StatsAggregator
 from CROUStillantData.analytics import Analytics
 from aiohttp import ClientSession
 from asyncpg import create_pool
@@ -32,6 +33,15 @@ async def main():
         pool=pool,
     )
     await worker.run()
+
+    # Maintien incrémental des statistiques de requests_logs (compteurs,
+    # rollups horaires/quotidiens, dédoublonnage IP/clés) — voir schema.sql
+    # et stats_aggregator.py. Indépendant du refresh des vues matérialisées
+    # ci-dessus.
+    stats_aggregator = StatsAggregator(
+        pool=pool,
+    )
+    await stats_aggregator.run()
 
     # Process analytics geo data
     session = ClientSession()
