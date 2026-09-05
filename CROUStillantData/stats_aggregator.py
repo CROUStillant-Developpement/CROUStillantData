@@ -61,7 +61,7 @@ class StatsAggregator:
             "SELECT LAST_PROCESSED_AT FROM stats_watermark WHERE ID = 1"
         )
         new_watermark: datetime = await connection.fetchval(
-            "SELECT NOW() - $1::interval", self.SAFETY_MARGIN
+            "SELECT LOCALTIMESTAMP - $1::interval", self.SAFETY_MARGIN
         )
 
         if new_watermark <= last_processed_at:
@@ -222,7 +222,7 @@ class StatsAggregator:
         :type connection: Connection
         """
         last_closed_hour: datetime = await connection.fetchval(
-            "SELECT DATE_TRUNC('hour', NOW()) - INTERVAL '1 hour'"
+            "SELECT DATE_TRUNC('hour', LOCALTIMESTAMP) - INTERVAL '1 hour'"
         )
         last_present_hour: datetime | None = await connection.fetchval(
             "SELECT MAX(hour) FROM stats_hourly"
