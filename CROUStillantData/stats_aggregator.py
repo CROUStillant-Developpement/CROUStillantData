@@ -70,7 +70,7 @@ class StatsAggregator:
         async with connection.transaction():
             await connection.execute(
                 """
-                WITH window AS (
+                WITH log_window AS (
                     SELECT *
                     FROM requests_logs
                     WHERE created_at > $1 AND created_at <= $2
@@ -92,7 +92,7 @@ class StatsAggregator:
                         COALESCE(SUM(ratelimit_used) FILTER (WHERE ratelimit_used >= 0), 0) AS sum_ratelimit_used,
                         COUNT(*) FILTER (WHERE ratelimit_used >= 0) AS count_ratelimit_used,
                         COALESCE(MAX(ratelimit_limit) FILTER (WHERE ratelimit_limit >= 0), 0) AS max_ratelimit_limit
-                    FROM window
+                    FROM log_window
                 )
                 UPDATE stats_counters SET
                     total_requests = stats_counters.total_requests + agg.total_requests,
