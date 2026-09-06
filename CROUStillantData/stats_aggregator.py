@@ -289,7 +289,7 @@ class StatsAggregator:
                     status_405, status_429, status_500, status_503
                 )
                 SELECT
-                    $1,
+                    $1::date,
                     COUNT(*) FILTER (WHERE status = 200),
                     COUNT(*) FILTER (WHERE status = 302),
                     COUNT(*) FILTER (WHERE status = 400),
@@ -299,7 +299,7 @@ class StatsAggregator:
                     COUNT(*) FILTER (WHERE status = 500),
                     COUNT(*) FILTER (WHERE status = 503)
                 FROM requests_logs
-                WHERE created_at >= $1 AND created_at < $1 + INTERVAL '1 day' AND ratelimit_limit >= 0
+                WHERE created_at >= $1::date AND created_at < $1::date + INTERVAL '1 day' AND ratelimit_limit >= 0
                 ON CONFLICT (day) DO NOTHING;
                 """,
                 day,
