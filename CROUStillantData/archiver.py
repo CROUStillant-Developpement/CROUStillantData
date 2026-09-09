@@ -12,9 +12,12 @@ _BOUND_EXPR_PATTERN = re.compile(
 )
 
 # Copie server-a-server via postgres_fdw (pas de round-trip Python pour les
-# colonnes JSONB) : on peut se permettre des lots plus gros que si les
-# lignes transitaient par l'application.
-_COPY_BATCH_SIZE = 20_000
+# colonnes JSONB) : on peut se permettre des lots plus gros que si les lignes
+# transitaient par l'application. On reste toutefois mesure : chaque lot est
+# une seule instruction cote serveur, et un lot trop gros allonge d'autant la
+# fenetre pendant laquelle une coupure de connexion fait perdre le travail en
+# cours (la copie est reprenable, mais seulement lot par lot).
+_COPY_BATCH_SIZE = 5_000
 
 _ARCHIVE_TABLE_COLUMNS = (
     "id", "key", "method", "path", "status", "params", "request_headers",
@@ -130,12 +133,31 @@ class Archiver:
 
             partitions = await self.__list_eligible_partitions(local_conn, cutoff)
 
-            if not partitions:
-                print("Archiver: aucune partition éligible à l'archivage.")
-                return
+        if not partitions:
+            print("Archiver: aucune partition éligible à l'archivage.")
+            return
 
-            for partition_name, upper_bound in partitions:
-                await self.__archive_partition(local_conn, partition_name, upper_bound)
+        # Une connexion par partition : la copie d'une grosse partition est
+        # longue, et si le serveur ferme la connexion en cours de route
+        # (le cas rencontre en production), on veut repartir sur une
+        # connexion saine pour les partitions suivantes plutot que de faire
+        # tomber toute l'execution. asyncpg jette d'office les connexions
+        # cassees rendues au pool.
+        for partition_name, lower_bound, upper_bound in partitions:
+            try:
+                async with self.local_pool.acquire() as local_conn:
+                    await self.__archive_partition(
+                        local_conn, partition_name, lower_bound, upper_bound
+                    )
+            except Exception as error:
+                # La copie est reprenable : rien n'est perdu, la partition
+                # reste locale et la prochaine execution repartira de la
+                # derniere ligne effectivement archivee.
+                print(
+                    f"Archiver: échec sur {partition_name} "
+                    f"({type(error).__name__}: {error}). Partition conservée "
+                    f"localement, reprise à la prochaine exécution."
+                )
 
     async def __bootstrap_archive_table(self) -> None:
         """
@@ -217,7 +239,7 @@ class Archiver:
 
     async def __list_eligible_partitions(
         self, connection: Connection, cutoff: datetime
-    ) -> list[tuple[str, datetime]]:
+    ) -> list[tuple[str, datetime, datetime]]:
         """
         Liste les partitions de requests_logs entièrement antérieures à
         `cutoff` et pas encore archivées.
@@ -226,8 +248,9 @@ class Archiver:
         :type connection: Connection
         :param cutoff: Date limite (les partitions strictement avant ne sont pas archivées)
         :type cutoff: datetime
-        :return: Liste de tuples (nom_partition, borne_superieure), triée par date croissante
-        :rtype: list[tuple[str, datetime]]
+        :return: Liste de tuples (nom_partition, borne_inferieure, borne_superieure),
+            triée par date croissante
+        :rtype: list[tuple[str, datetime, datetime]]
         """
         rows = await connection.fetch(
             """
@@ -247,7 +270,7 @@ class Archiver:
             for r in await connection.fetch("SELECT partition_name FROM archive_log")
         }
 
-        eligible: list[tuple[str, datetime]] = []
+        eligible: list[tuple[str, datetime, datetime]] = []
         for row in rows:
             name = row["partition_name"]
             if name in already_archived or not _PARTITION_NAME_PATTERN.match(name):
@@ -257,15 +280,20 @@ class Archiver:
             if not match:
                 continue
 
+            lower_bound = datetime.fromisoformat(match.group(1))
             upper_bound = datetime.fromisoformat(match.group(2))
             if upper_bound <= cutoff:
-                eligible.append((name, upper_bound))
+                eligible.append((name, lower_bound, upper_bound))
 
-        eligible.sort(key=lambda item: item[1])
+        eligible.sort(key=lambda item: item[2])
         return eligible
 
     async def __archive_partition(
-        self, local_conn: Connection, partition_name: str, upper_bound: datetime
+        self,
+        local_conn: Connection,
+        partition_name: str,
+        lower_bound: datetime,
+        upper_bound: datetime,
     ) -> None:
         """
         Archive puis supprime une partition : verifie que les statistiques
@@ -277,29 +305,28 @@ class Archiver:
         :type local_conn: Connection
         :param partition_name: Nom de la partition (deja valide contre _PARTITION_NAME_PATTERN)
         :type partition_name: str
+        :param lower_bound: Borne inferieure (inclusive) de la partition
+        :type lower_bound: datetime
         :param upper_bound: Borne superieure (exclusive) de la partition
         :type upper_bound: datetime
         """
-        watermark: datetime = await local_conn.fetchval(
-            "SELECT last_processed_at FROM stats_watermark WHERE id = 1"
-        )
-        if watermark < upper_bound:
-            print(
-                f"Archiver: {partition_name} ignorée — StatsAggregator n'a pas "
-                f"encore traité toutes ses lignes (watermark={watermark})."
-            )
+        if not await self.__stats_are_ready(
+            local_conn, partition_name, lower_bound, upper_bound
+        ):
             return
 
         local_count: int = await local_conn.fetchval(
             f"SELECT COUNT(*) FROM {partition_name}"
         )
 
-        copied = await self.__copy_partition(local_conn, partition_name, upper_bound)
+        archived = await self.__copy_partition(
+            local_conn, partition_name, lower_bound, upper_bound
+        )
 
-        if copied != local_count:
+        if archived != local_count:
             print(
-                f"Archiver: ABANDON de {partition_name} — {copied} lignes copiées "
-                f"pour {local_count} attendues. Partition conservée localement."
+                f"Archiver: ABANDON de {partition_name} — {archived} lignes présentes "
+                f"côté archive pour {local_count} attendues. Partition conservée localement."
             )
             return
 
@@ -311,49 +338,198 @@ class Archiver:
             await local_conn.execute(
                 "INSERT INTO archive_log (partition_name, row_count) VALUES ($1, $2)",
                 partition_name,
-                copied,
+                archived,
             )
 
-        print(f"Archiver: {partition_name} archivée ({copied} lignes) et supprimée localement.")
+        print(f"Archiver: {partition_name} archivée ({archived} lignes) et supprimée localement.")
 
-    async def __copy_partition(
-        self, local_conn: Connection, partition_name: str, upper_bound: datetime
+    async def __stats_are_ready(
+        self,
+        local_conn: Connection,
+        partition_name: str,
+        lower_bound: datetime,
+        upper_bound: datetime,
+    ) -> bool:
+        """
+        Verifie que StatsAggregator a bien fige toutes les statistiques
+        derivees de cette partition avant qu'on la supprime.
+
+        Le watermark ne suffit pas : il ne couvre que les compteurs
+        cumulatifs (stats_counters, stats_by_*, ...), qui avancent a chaque
+        execution. Les rollups stats_hourly / stats_daily, eux, sont
+        calcules depuis requests_logs tranche par tranche, avec un
+        rattrapage borne par execution (_MAX_CATCHUP_HOURS /
+        _MAX_CATCHUP_DAYS) : supprimer une partition avant qu'ils l'aient
+        finalisee laisserait des trous definitifs dans v_gf_hourly_* et
+        v_gf_daily_status_*, impossibles a combler une fois les lignes
+        parties (StatsAggregator refuse, a raison, d'inventer des zeros pour
+        une periode qui n'est plus dans requests_logs).
+
+        On compte donc explicitement les tranches manquantes sur l'intervalle
+        de la partition, plutot que de comparer a MAX(hour) / MAX(day) : ces
+        maximums ne garantissent rien sur les trous situes en dessous d'eux.
+
+        :param local_conn: Connexion locale à utiliser
+        :type local_conn: Connection
+        :param partition_name: Nom de la partition concernee
+        :type partition_name: str
+        :param lower_bound: Borne inferieure (inclusive) de la partition
+        :type lower_bound: datetime
+        :param upper_bound: Borne superieure (exclusive) de la partition
+        :type upper_bound: datetime
+        :return: True si toutes les statistiques couvrent deja la partition
+        :rtype: bool
+        """
+        watermark: datetime = await local_conn.fetchval(
+            "SELECT last_processed_at FROM stats_watermark WHERE id = 1"
+        )
+        if watermark < upper_bound:
+            print(
+                f"Archiver: {partition_name} ignorée — StatsAggregator n'a pas "
+                f"encore traité toutes ses lignes (watermark={watermark})."
+            )
+            return False
+
+        gaps = await local_conn.fetchrow(
+            """
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM generate_series(
+                        $1::timestamp,
+                        $2::timestamp - INTERVAL '1 hour',
+                        INTERVAL '1 hour'
+                    ) AS h
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM stats_hourly s WHERE s.hour = h
+                    )
+                ) AS missing_hours,
+                (
+                    SELECT COUNT(*)
+                    FROM generate_series(
+                        $1::timestamp,
+                        $2::timestamp - INTERVAL '1 day',
+                        INTERVAL '1 day'
+                    ) AS d
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM stats_daily s WHERE s.day = d::date
+                    )
+                ) AS missing_days
+            """,
+            lower_bound,
+            upper_bound,
+        )
+
+        if gaps["missing_hours"] or gaps["missing_days"]:
+            print(
+                f"Archiver: {partition_name} ignorée — rollups incomplets sur "
+                f"cette période ({gaps['missing_hours']} heure(s) et "
+                f"{gaps['missing_days']} jour(s) manquants). StatsAggregator "
+                f"les comblera lors de ses prochains passages."
+            )
+            return False
+
+        return True
+
+    async def __remote_count(
+        self, local_conn: Connection, lower_bound: datetime, upper_bound: datetime
     ) -> int:
         """
-        Copie toutes les lignes d'une partition vers la table étrangère
-        (donc vers la base distante), par lots, entièrement côté serveur :
-        INSERT INTO table_étrangère SELECT ... FROM partition. Seules les
-        colonnes (created_at, id) de chaque lot reviennent au client, via
-        RETURNING, pour paginer par clé — les colonnes lourdes (params,
-        request_headers, ...) ne quittent jamais PostgreSQL.
+        Compte les lignes deja presentes cote archive sur l'intervalle d'une
+        partition. Le COUNT(*) est pousse tel quel au serveur distant par
+        postgres_fdw : aucune ligne ne transite.
+
+        :param local_conn: Connexion locale à utiliser
+        :type local_conn: Connection
+        :param lower_bound: Borne inferieure (inclusive) de la partition
+        :type lower_bound: datetime
+        :param upper_bound: Borne superieure (exclusive) de la partition
+        :type upper_bound: datetime
+        :return: Nombre de lignes archivees sur cet intervalle
+        :rtype: int
+        """
+        return await local_conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM {_FOREIGN_TABLE_NAME}
+            WHERE created_at >= $1 AND created_at < $2
+            """,
+            lower_bound,
+            upper_bound,
+        )
+
+    async def __copy_partition(
+        self,
+        local_conn: Connection,
+        partition_name: str,
+        lower_bound: datetime,
+        upper_bound: datetime,
+    ) -> int:
+        """
+        Copie toutes les lignes d'une partition vers la table étrangère (donc
+        vers la base distante), par lots, entièrement côté serveur : INSERT
+        INTO table_étrangère SELECT ... FROM partition. Seules les colonnes
+        (created_at, id) de chaque lot reviennent au client, pour paginer par
+        clé — les colonnes lourdes (params, request_headers, ...) ne quittent
+        jamais PostgreSQL.
+
+        L'opération est reprenable : une exécution interrompue (perte de la
+        connexion pendant la copie) laisse des lignes déjà écrites côté
+        archive. On repart donc du dernier created_at déjà archivé sur
+        l'intervalle de la partition, et chaque lot est inséré en ON CONFLICT
+        DO NOTHING pour absorber le recouvrement au point de reprise
+        (plusieurs lignes peuvent partager le même created_at) — sans quoi la
+        reprise échoue sur requests_logs_archive_pkey.
 
         :param local_conn: Connexion locale à utiliser
         :type local_conn: Connection
         :param partition_name: Nom de la partition source
         :type partition_name: str
+        :param lower_bound: Borne inferieure (inclusive) de la partition
+        :type lower_bound: datetime
         :param upper_bound: Borne superieure (exclusive) de la partition
         :type upper_bound: datetime
-        :return: Nombre total de lignes copiées
+        :return: Nombre de lignes presentes cote archive pour cette partition
         :rtype: int
         """
         columns = ", ".join(_ARCHIVE_TABLE_COLUMNS)
-        insert_select_sql = f"""
-            INSERT INTO {_FOREIGN_TABLE_NAME} ({columns})
-            SELECT {columns}
-            FROM {{partition}}
-            WHERE (created_at, id) > ($1, $2) AND created_at < $3
-            ORDER BY created_at, id
-            LIMIT {_COPY_BATCH_SIZE}
-            RETURNING created_at, id
-        """.format(partition=partition_name)
+        copy_batch_sql = f"""
+            WITH batch AS MATERIALIZED (
+                SELECT {columns}
+                FROM {partition_name}
+                WHERE (created_at, id) > ($1, $2) AND created_at < $3
+                ORDER BY created_at, id
+                LIMIT {_COPY_BATCH_SIZE}
+            ), copied AS (
+                INSERT INTO {_FOREIGN_TABLE_NAME} ({columns})
+                SELECT {columns} FROM batch
+                ON CONFLICT DO NOTHING
+            )
+            SELECT created_at, id FROM batch ORDER BY created_at, id
+        """
 
-        total_copied = 0
-        last_created_at = datetime.min
+        # Reprise : on redemarre AU dernier instant deja archive (et non
+        # apres lui) pour ne pas sauter les lignes qui partagent ce
+        # created_at et n'auraient pas ete inserees avant la coupure.
+        resume_at: datetime | None = await local_conn.fetchval(
+            f"""
+            SELECT MAX(created_at) FROM {_FOREIGN_TABLE_NAME}
+            WHERE created_at >= $1 AND created_at < $2
+            """,
+            lower_bound,
+            upper_bound,
+        )
+        if resume_at is not None:
+            print(
+                f"Archiver: reprise de {partition_name} à partir de {resume_at} "
+                f"(lignes déjà archivées par une exécution précédente)."
+            )
+
+        last_created_at = resume_at if resume_at is not None else datetime.min
         last_id = UUID(int=0)
 
         while True:
             rows = await local_conn.fetch(
-                insert_select_sql,
+                copy_batch_sql,
                 last_created_at,
                 last_id,
                 upper_bound,
@@ -361,7 +537,6 @@ class Archiver:
             if not rows:
                 break
 
-            total_copied += len(rows)
             last_row = rows[-1]
             last_created_at = last_row["created_at"]
             last_id = last_row["id"]
@@ -369,4 +544,4 @@ class Archiver:
             if len(rows) < _COPY_BATCH_SIZE:
                 break
 
-        return total_copied
+        return await self.__remote_count(local_conn, lower_bound, upper_bound)

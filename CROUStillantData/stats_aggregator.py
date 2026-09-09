@@ -13,6 +13,7 @@ class StatsAggregator:
     """
     Maintient de façon incrémentale les tables de statistiques permanentes
     (stats_counters, stats_by_method, stats_by_api_version, stats_by_param,
+    stats_by_route,
     unique_hashed_ips, unique_keys, stats_hour_of_day_24h,
     unique_ips_by_hour_of_day, stats_hourly, stats_daily) à partir de
     requests_logs, sans jamais rescanner la table entière.
@@ -88,10 +89,13 @@ class StatsAggregator:
                         COUNT(*) FILTER (WHERE ratelimit_limit >= 0 AND status = 405) AS breakdown_405,
                         COUNT(*) FILTER (WHERE ratelimit_limit >= 0 AND status = 429) AS breakdown_429,
                         COUNT(*) FILTER (WHERE ratelimit_limit >= 0 AND key IS NOT NULL) AS requests_with_key,
+                        COUNT(*) FILTER (WHERE ratelimit_limit >= 0 AND key IS NULL) AS requests_without_key,
                         COALESCE(MAX(ratelimit_used), 0) AS max_ratelimit_used,
                         COALESCE(SUM(ratelimit_used) FILTER (WHERE ratelimit_used >= 0), 0) AS sum_ratelimit_used,
                         COUNT(*) FILTER (WHERE ratelimit_used >= 0) AS count_ratelimit_used,
-                        COALESCE(MAX(ratelimit_limit) FILTER (WHERE ratelimit_limit >= 0), 0) AS max_ratelimit_limit
+                        COALESCE(MAX(ratelimit_limit) FILTER (WHERE ratelimit_limit >= 0), 0) AS max_ratelimit_limit,
+                        COALESCE(MAX(ratelimit_used::numeric / ratelimit_limit) FILTER (WHERE ratelimit_limit > 0), 0) AS max_ratelimit_ratio,
+                        COUNT(*) FILTER (WHERE ratelimit_limit > 0 AND ratelimit_used >= 0.8 * ratelimit_limit) AS near_limit_count
                     FROM log_window
                 )
                 UPDATE stats_counters SET
@@ -106,10 +110,13 @@ class StatsAggregator:
                     breakdown_405 = stats_counters.breakdown_405 + agg.breakdown_405,
                     breakdown_429 = stats_counters.breakdown_429 + agg.breakdown_429,
                     requests_with_key = stats_counters.requests_with_key + agg.requests_with_key,
+                    requests_without_key = stats_counters.requests_without_key + agg.requests_without_key,
                     max_ratelimit_used = GREATEST(stats_counters.max_ratelimit_used, agg.max_ratelimit_used),
                     sum_ratelimit_used = stats_counters.sum_ratelimit_used + agg.sum_ratelimit_used,
                     count_ratelimit_used = stats_counters.count_ratelimit_used + agg.count_ratelimit_used,
-                    max_ratelimit_limit = GREATEST(stats_counters.max_ratelimit_limit, agg.max_ratelimit_limit)
+                    max_ratelimit_limit = GREATEST(stats_counters.max_ratelimit_limit, agg.max_ratelimit_limit),
+                    max_ratelimit_ratio = GREATEST(stats_counters.max_ratelimit_ratio, agg.max_ratelimit_ratio),
+                    near_limit_count = stats_counters.near_limit_count + agg.near_limit_count
                 FROM agg
                 WHERE stats_counters.id = 1;
                 """,
@@ -151,6 +158,26 @@ class StatsAggregator:
                 WHERE created_at > $1 AND created_at <= $2
                 GROUP BY p.key
                 ON CONFLICT (param) DO UPDATE SET total = stats_by_param.total + EXCLUDED.total;
+                """,
+                last_processed_at,
+                new_watermark,
+            )
+
+            await connection.execute(
+                """
+                INSERT INTO stats_by_route (route, total, sum_process_time, count_process_time)
+                SELECT
+                    normalize_route(path),
+                    COUNT(*),
+                    COALESCE(SUM(process_time) FILTER (WHERE ratelimit_limit >= 0), 0),
+                    COUNT(*) FILTER (WHERE ratelimit_limit >= 0)
+                FROM requests_logs
+                WHERE created_at > $1 AND created_at <= $2
+                GROUP BY 1
+                ON CONFLICT (route) DO UPDATE SET
+                    total = stats_by_route.total + EXCLUDED.total,
+                    sum_process_time = stats_by_route.sum_process_time + EXCLUDED.sum_process_time,
+                    count_process_time = stats_by_route.count_process_time + EXCLUDED.count_process_time;
                 """,
                 last_processed_at,
                 new_watermark,
@@ -240,7 +267,10 @@ class StatsAggregator:
                 INSERT INTO stats_hourly (
                     hour, requests, error_count, unique_visitors,
                     sum_ratelimit_used, count_ratelimit_used,
-                    sum_process_time, count_process_time, under_200ms_count
+                    sum_process_time, count_process_time, under_200ms_count,
+                    sum_ratelimit_limit, count_ratelimit_limit,
+                    sum_ratelimit_ratio, count_ratelimit_ratio,
+                    max_ratelimit_ratio, near_limit_count
                 )
                 SELECT
                     $1,
@@ -251,7 +281,13 @@ class StatsAggregator:
                     COUNT(*) FILTER (WHERE ratelimit_limit >= 0),
                     COALESCE(SUM(process_time) FILTER (WHERE ratelimit_limit >= 0), 0),
                     COUNT(*) FILTER (WHERE ratelimit_limit >= 0),
-                    COUNT(*) FILTER (WHERE process_time < 200)
+                    COUNT(*) FILTER (WHERE process_time < 200),
+                    COALESCE(SUM(ratelimit_limit) FILTER (WHERE ratelimit_limit != -1), 0),
+                    COUNT(*) FILTER (WHERE ratelimit_limit != -1),
+                    COALESCE(SUM(ratelimit_used::numeric / ratelimit_limit) FILTER (WHERE ratelimit_limit > 0), 0),
+                    COUNT(*) FILTER (WHERE ratelimit_limit > 0),
+                    COALESCE(MAX(ratelimit_used::numeric / ratelimit_limit) FILTER (WHERE ratelimit_limit > 0), 0),
+                    COUNT(*) FILTER (WHERE ratelimit_limit > 0 AND ratelimit_used >= 0.8 * ratelimit_limit)
                 FROM requests_logs
                 WHERE created_at >= $1 AND created_at < $1 + INTERVAL '1 hour'
                 ON CONFLICT (hour) DO NOTHING;
@@ -286,7 +322,9 @@ class StatsAggregator:
                 """
                 INSERT INTO stats_daily (
                     day, status_200, status_302, status_400, status_404,
-                    status_405, status_429, status_500, status_503
+                    status_405, status_429, status_500, status_503,
+                    unique_ips, errors_4xx, errors_5xx,
+                    p50_process_time, p95_process_time
                 )
                 SELECT
                     $1::date,
@@ -297,7 +335,12 @@ class StatsAggregator:
                     COUNT(*) FILTER (WHERE status = 405),
                     COUNT(*) FILTER (WHERE status = 429),
                     COUNT(*) FILTER (WHERE status = 500),
-                    COUNT(*) FILTER (WHERE status = 503)
+                    COUNT(*) FILTER (WHERE status = 503),
+                    COUNT(DISTINCT hashed_ip),
+                    COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499),
+                    COUNT(*) FILTER (WHERE status BETWEEN 500 AND 599),
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY process_time),
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY process_time)
                 FROM requests_logs
                 WHERE created_at >= $1::date AND created_at < $1::date + INTERVAL '1 day' AND ratelimit_limit >= 0
                 ON CONFLICT (day) DO NOTHING;

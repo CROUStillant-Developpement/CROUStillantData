@@ -103,6 +103,7 @@ class Worker:
 
             refreshed_count = 0
             skipped_count = 0
+            failed_count = 0
 
             for view, interval_minutes in self.views_ref.items():
                 if not self.__is_valid_view_name(view):
@@ -120,13 +121,27 @@ class Worker:
                     f"Raffraîchissement de la vue matérialisée {view} (intervalle: {interval_minutes} min)..."
                 )
 
-                await connection.execute(
-                    f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view};"
-                )
+                try:
+                    await connection.execute(
+                        f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view};"
+                    )
+                except Exception as error:
+                    # Une vue en erreur (renommée, convertie en vue simple,
+                    # index unique manquant, ...) ne doit pas faire tomber tout
+                    # __main__.py : StatsAggregator s'exécute après le Worker,
+                    # et une exception ici gèlerait toutes les statistiques.
+                    print(
+                        f"Vue {view} : échec du rafraîchissement "
+                        f"({type(error).__name__}: {error})"
+                    )
+                    failed_count += 1
+                    continue
+
                 self.last_refresh[view] = datetime.now()
                 refreshed_count += 1
 
         self.__save_last_refresh()
         print(
-            f"Raffraîchissement terminé. {refreshed_count} vue(s) rafraîchie(s), {skipped_count} vue(s) ignorée(s)."
+            f"Raffraîchissement terminé. {refreshed_count} vue(s) rafraîchie(s), "
+            f"{skipped_count} vue(s) ignorée(s), {failed_count} vue(s) en échec."
         )
