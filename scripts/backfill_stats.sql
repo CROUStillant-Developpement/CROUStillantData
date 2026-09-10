@@ -111,7 +111,15 @@ WHERE ratelimit_limit >= 0 AND hashed_ip IS NOT NULL;
 
 -- Rollups horaires/quotidiens : uniquement les périodes déjà entièrement
 -- closes (la période en cours sera finalisée par StatsAggregator une fois
--- terminée)
+-- terminée).
+--
+-- Génération via generate_series + LEFT JOIN (et non un simple GROUP BY) :
+-- une heure/jour sans la moindre requête doit quand même produire une ligne
+-- a zero, exactement comme le fait StatsAggregator.__finalize_hours /
+-- __finalize_days en régime incrémental. Un GROUP BY nu omettrait ces
+-- périodes silencieusement, et comme StatsAggregator ne revient jamais en
+-- arrière de MAX(hour) / MAX(day), le trou resterait définitif (voir
+-- backfill_stats_gaps.sql, qui comble ce cas s'il s'est déjà produit).
 TRUNCATE stats_hourly;
 INSERT INTO stats_hourly (
     hour, requests, error_count, unique_visitors,
@@ -122,24 +130,28 @@ INSERT INTO stats_hourly (
     max_ratelimit_ratio, near_limit_count
 )
 SELECT
-    DATE_TRUNC('hour', created_at),
-    COUNT(*),
-    COUNT(*) FILTER (WHERE status >= 400),
-    COUNT(DISTINCT hashed_ip),
-    COALESCE(SUM(ratelimit_used) FILTER (WHERE ratelimit_limit >= 0), 0),
-    COUNT(*) FILTER (WHERE ratelimit_limit >= 0),
-    COALESCE(SUM(process_time) FILTER (WHERE ratelimit_limit >= 0), 0),
-    COUNT(*) FILTER (WHERE ratelimit_limit >= 0),
-    COUNT(*) FILTER (WHERE process_time < 200),
-    COALESCE(SUM(ratelimit_limit) FILTER (WHERE ratelimit_limit != -1), 0),
-    COUNT(*) FILTER (WHERE ratelimit_limit != -1),
-    COALESCE(SUM(ratelimit_used::numeric / ratelimit_limit) FILTER (WHERE ratelimit_limit > 0), 0),
-    COUNT(*) FILTER (WHERE ratelimit_limit > 0),
-    COALESCE(MAX(ratelimit_used::numeric / ratelimit_limit) FILTER (WHERE ratelimit_limit > 0), 0),
-    COUNT(*) FILTER (WHERE ratelimit_limit > 0 AND ratelimit_used >= 0.8 * ratelimit_limit)
-FROM requests_logs
-WHERE created_at < DATE_TRUNC('hour', NOW())
-GROUP BY 1;
+    h,
+    COUNT(rl.id),
+    COUNT(rl.id) FILTER (WHERE rl.status >= 400),
+    COUNT(DISTINCT rl.hashed_ip),
+    COALESCE(SUM(rl.ratelimit_used) FILTER (WHERE rl.ratelimit_limit >= 0), 0),
+    COUNT(rl.id) FILTER (WHERE rl.ratelimit_limit >= 0),
+    COALESCE(SUM(rl.process_time) FILTER (WHERE rl.ratelimit_limit >= 0), 0),
+    COUNT(rl.id) FILTER (WHERE rl.ratelimit_limit >= 0),
+    COUNT(rl.id) FILTER (WHERE rl.process_time < 200),
+    COALESCE(SUM(rl.ratelimit_limit) FILTER (WHERE rl.ratelimit_limit != -1), 0),
+    COUNT(rl.id) FILTER (WHERE rl.ratelimit_limit != -1),
+    COALESCE(SUM(rl.ratelimit_used::numeric / rl.ratelimit_limit) FILTER (WHERE rl.ratelimit_limit > 0), 0),
+    COUNT(rl.id) FILTER (WHERE rl.ratelimit_limit > 0),
+    COALESCE(MAX(rl.ratelimit_used::numeric / rl.ratelimit_limit) FILTER (WHERE rl.ratelimit_limit > 0), 0),
+    COUNT(rl.id) FILTER (WHERE rl.ratelimit_limit > 0 AND rl.ratelimit_used >= 0.8 * rl.ratelimit_limit)
+FROM generate_series(
+    (SELECT DATE_TRUNC('hour', MIN(created_at)) FROM requests_logs),
+    DATE_TRUNC('hour', NOW()) - INTERVAL '1 hour',
+    INTERVAL '1 hour'
+) AS h
+LEFT JOIN requests_logs rl ON DATE_TRUNC('hour', rl.created_at) = h
+GROUP BY h;
 
 TRUNCATE stats_daily;
 INSERT INTO stats_daily (
@@ -149,23 +161,29 @@ INSERT INTO stats_daily (
     p50_process_time, p95_process_time
 )
 SELECT
-    DATE_TRUNC('day', created_at)::date,
-    COUNT(*) FILTER (WHERE status = 200),
-    COUNT(*) FILTER (WHERE status = 302),
-    COUNT(*) FILTER (WHERE status = 400),
-    COUNT(*) FILTER (WHERE status = 404),
-    COUNT(*) FILTER (WHERE status = 405),
-    COUNT(*) FILTER (WHERE status = 429),
-    COUNT(*) FILTER (WHERE status = 500),
-    COUNT(*) FILTER (WHERE status = 503),
-    COUNT(DISTINCT hashed_ip),
-    COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499),
-    COUNT(*) FILTER (WHERE status BETWEEN 500 AND 599),
-    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY process_time),
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY process_time)
-FROM requests_logs
-WHERE created_at < CURRENT_DATE AND ratelimit_limit >= 0
-GROUP BY 1;
+    d::date,
+    COUNT(*) FILTER (WHERE rl.status = 200),
+    COUNT(*) FILTER (WHERE rl.status = 302),
+    COUNT(*) FILTER (WHERE rl.status = 400),
+    COUNT(*) FILTER (WHERE rl.status = 404),
+    COUNT(*) FILTER (WHERE rl.status = 405),
+    COUNT(*) FILTER (WHERE rl.status = 429),
+    COUNT(*) FILTER (WHERE rl.status = 500),
+    COUNT(*) FILTER (WHERE rl.status = 503),
+    COUNT(DISTINCT rl.hashed_ip),
+    COUNT(*) FILTER (WHERE rl.status BETWEEN 400 AND 499),
+    COUNT(*) FILTER (WHERE rl.status BETWEEN 500 AND 599),
+    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY rl.process_time),
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY rl.process_time)
+FROM generate_series(
+    (SELECT DATE_TRUNC('day', MIN(created_at))::date FROM requests_logs),
+    CURRENT_DATE - 1,
+    INTERVAL '1 day'
+) AS d
+LEFT JOIN requests_logs rl
+    ON DATE_TRUNC('day', rl.created_at)::date = d
+    AND rl.ratelimit_limit >= 0
+GROUP BY d;
 
 
 -- Curseur : tout ce qui existe deja au moment du backfill est couvert,

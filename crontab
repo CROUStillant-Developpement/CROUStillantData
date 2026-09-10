@@ -3,3 +3,6 @@
 
 # Every 30 minutes during the night (21:00-5:59)
 0,30 21-23,0-5 * * * uv run --project /CROUStillantData /CROUStillantData/__main__.py >> /CROUStillantData/crontab.log 2>&1
+
+# Archive old requests_logs partitions to the distant database, once a day
+15 3 * * * uv run --project /CROUStillantData /CROUStillantData/archive_main.py >> /CROUStillantData/archive_crontab.log 2>&1
