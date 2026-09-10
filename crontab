@@ -1,8 +1,13 @@
+# crond runs as PID 1 (CMD ["crond", "-f"] in the Dockerfile) so writing to
+# /proc/1/fd/{1,2} sends job output to the container's own stdout/stderr,
+# making it visible via `docker logs croustillant-data` instead of being
+# stuck in a file inside the container.
+
 # Every 5 minutes during the day (6:00-20:59)
-*/5 6-20 * * * uv run --project /CROUStillantData /CROUStillantData/__main__.py >> /CROUStillantData/crontab.log 2>&1
+*/5 6-20 * * * uv run --project /CROUStillantData /CROUStillantData/__main__.py >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # Every 30 minutes during the night (21:00-5:59)
-0,30 21-23,0-5 * * * uv run --project /CROUStillantData /CROUStillantData/__main__.py >> /CROUStillantData/crontab.log 2>&1
+0,30 21-23,0-5 * * * uv run --project /CROUStillantData /CROUStillantData/__main__.py >> /proc/1/fd/1 2>> /proc/1/fd/2
 
 # Archive old requests_logs partitions to the distant database, once a day
-15 3 * * * uv run --project /CROUStillantData /CROUStillantData/archive_main.py >> /CROUStillantData/archive_crontab.log 2>&1
+15 3 * * * uv run --project /CROUStillantData /CROUStillantData/archive_main.py >> /proc/1/fd/1 2>> /proc/1/fd/2
