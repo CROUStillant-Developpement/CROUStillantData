@@ -36,9 +36,16 @@ INSERT INTO stats_watermark (ID) VALUES (1) ON CONFLICT (ID) DO NOTHING;
 -- execution (pas de fenetre SQL cote analytics_pool), mais le watermark
 -- borne en Python les lignes deja comptees dans GEO_USAGE.TOTAL : sans lui,
 -- chaque execution recompterait tout l'historique des sessions.
+--
+-- TIMESTAMPTZ (et non TIMESTAMP comme stats_watermark) : contrairement a
+-- requests_logs, session.created_at vient d'une base Postgres distincte
+-- (Umami) et revient tz-aware cote asyncpg. Comparer un TIMESTAMP naif
+-- (LOCALTIMESTAMP) a ce created_at leve TypeError: can't compare
+-- offset-naive and offset-aware datetimes ; TIMESTAMPTZ + NOW() donne un
+-- instant absolu, comparable sans ambiguite quelle que soit la base.
 CREATE TABLE IF NOT EXISTS geo_usage_watermark(
     ID INT PRIMARY KEY DEFAULT 1,
-    LAST_PROCESSED_AT TIMESTAMP NOT NULL DEFAULT '1970-01-01',
+    LAST_PROCESSED_AT TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01',
     CONSTRAINT CK_GEO_USAGE_WATERMARK_SINGLETON CHECK (ID = 1)
 );
 
@@ -293,33 +300,3 @@ CREATE OR REPLACE FUNCTION normalize_route(P TEXT) RETURNS TEXT AS $$
                '/[0-9]+(?=/|$)', '/<code>', 'g'
            );
 $$ LANGUAGE SQL IMMUTABLE;
-
-
--- ================================================
--- MIGRATIONS • Colonnes ajoutees apres coup
--- ================================================
---
--- Les CREATE TABLE ci-dessus sont en IF NOT EXISTS : sur une base deja en
--- place ils ne font rien, donc les colonnes ajoutees apres coup doivent
--- l'etre explicitement ici. Idempotent (ADD COLUMN IF NOT EXISTS), donc
--- schema.sql reste rejouable tel quel.
---
--- Ces colonnes ne sont que des CONTENANTS : pour remplir l'historique deja
--- fige, lancer ensuite migrate_stats.sql.
-
-ALTER TABLE stats_counters ADD COLUMN IF NOT EXISTS REQUESTS_WITHOUT_KEY BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE stats_counters ADD COLUMN IF NOT EXISTS MAX_RATELIMIT_RATIO NUMERIC NOT NULL DEFAULT 0;
-ALTER TABLE stats_counters ADD COLUMN IF NOT EXISTS NEAR_LIMIT_COUNT BIGINT NOT NULL DEFAULT 0;
-
-ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS SUM_RATELIMIT_LIMIT BIGINT;
-ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS COUNT_RATELIMIT_LIMIT BIGINT;
-ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS SUM_RATELIMIT_RATIO NUMERIC;
-ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS COUNT_RATELIMIT_RATIO BIGINT;
-ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS MAX_RATELIMIT_RATIO NUMERIC;
-ALTER TABLE stats_hourly ADD COLUMN IF NOT EXISTS NEAR_LIMIT_COUNT BIGINT;
-
-ALTER TABLE stats_daily ADD COLUMN IF NOT EXISTS UNIQUE_IPS BIGINT;
-ALTER TABLE stats_daily ADD COLUMN IF NOT EXISTS ERRORS_4XX BIGINT;
-ALTER TABLE stats_daily ADD COLUMN IF NOT EXISTS ERRORS_5XX BIGINT;
-ALTER TABLE stats_daily ADD COLUMN IF NOT EXISTS P50_PROCESS_TIME NUMERIC;
-ALTER TABLE stats_daily ADD COLUMN IF NOT EXISTS P95_PROCESS_TIME NUMERIC;

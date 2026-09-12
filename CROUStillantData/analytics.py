@@ -70,7 +70,71 @@ class Analytics:
         since the last run.
         """
         await self.__load()
+        known_cities = await self.__ensure_geo_data()
+        await self.update_geo_usage(known_cities)
 
+    async def backfill(self) -> None:
+        """
+        One-off seed of GEO_USAGE from the *entire* session history,
+        ignoring geo_usage_watermark. Meant to be run manually once (see
+        backfill_geo_usage.py), e.g. right after GEO_USAGE is created, or to
+        recompute it from scratch — never as part of the scheduled
+        process() cycle, which increments instead of overwriting.
+
+        Sessions whose city still fails geodecoding by the end of this run
+        are skipped, same as in update_geo_usage: they will only be counted
+        once that city is geodecoded, and only from sessions created after
+        the watermark this backfill leaves behind.
+        """
+        await self.__load()
+        known_cities = await self.__ensure_geo_data()
+
+        city_counts: dict[str, int] = {}
+        max_created_at: datetime | None = None
+
+        for record in self.df_analytics_pool:
+            city = record.get("city")
+            created_at = record.get("created_at")
+
+            if created_at is not None and (
+                max_created_at is None or created_at > max_created_at
+            ):
+                max_created_at = created_at
+
+            if city and city in known_cities and record.get("country") == "FR":
+                city_counts[city] = city_counts.get(city, 0) + 1
+
+        async with self.pool.acquire() as connection:
+            connection: Connection
+
+            async with connection.transaction():
+                await connection.execute("TRUNCATE GEO_USAGE")
+
+                if city_counts:
+                    await connection.executemany(
+                        "INSERT INTO GEO_USAGE (CITY, TOTAL) VALUES ($1, $2);",
+                        list(city_counts.items()),
+                    )
+
+                if max_created_at is not None:
+                    await connection.execute(
+                        "UPDATE geo_usage_watermark SET last_processed_at = $1 WHERE id = 1",
+                        max_created_at,
+                    )
+
+        print(
+            f"Backfill GEO_USAGE: {sum(city_counts.values())} session(s) sur {len(city_counts)} ville(s)."
+        )
+
+    async def __ensure_geo_data(self) -> set[str]:
+        """
+        Geodecode every distinct French city seen in the loaded analytics
+        sessions that isn't already in GEO_DATA (self.df_pool).
+
+        :return: The set of city names now known to GEO_DATA (pre-existing
+            plus newly geodecoded this call).
+        :rtype: set[str]
+        """
         distinct_cities = {
             record.get("city")
             for record in self.df_analytics_pool
@@ -89,7 +153,7 @@ class Analytics:
                 if await self.geodecode(city):
                     known_cities.add(city)
 
-        await self.update_geo_usage(known_cities)
+        return known_cities
 
     async def geodecode(self, city: str) -> bool:
         """
@@ -158,6 +222,11 @@ class Analytics:
         full on every run (see __load), so the watermark is what keeps a
         session from being counted twice.
 
+        geo_usage_watermark is TIMESTAMPTZ and compared against NOW(), not
+        LOCALTIMESTAMP: session.created_at comes back tz-aware from asyncpg
+        (Umami, separate Postgres instance), and comparing it to a naive
+        datetime raises TypeError.
+
         :param known_cities: Cities currently present (or just inserted) in
             GEO_DATA. A session for a city outside this set is skipped this
             round rather than violating GEO_USAGE's foreign key; it is
@@ -172,7 +241,7 @@ class Analytics:
                 "SELECT LAST_PROCESSED_AT FROM geo_usage_watermark WHERE ID = 1"
             )
             new_watermark: datetime = await connection.fetchval(
-                "SELECT LOCALTIMESTAMP - $1::interval", self.SAFETY_MARGIN
+                "SELECT NOW() - $1::interval", self.SAFETY_MARGIN
             )
 
         if new_watermark <= last_processed_at:
