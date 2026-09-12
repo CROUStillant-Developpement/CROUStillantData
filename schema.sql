@@ -30,6 +30,21 @@ CREATE TABLE IF NOT EXISTS stats_watermark(
 INSERT INTO stats_watermark (ID) VALUES (1) ON CONFLICT (ID) DO NOTHING;
 
 
+-- Curseur d'avancement de Analytics (analytics.py) sur la colonne
+-- created_at de la table "session" (base ANALYTICS_POSTGRES_*, schema
+-- Umami). Cette table session est rechargee integralement a chaque
+-- execution (pas de fenetre SQL cote analytics_pool), mais le watermark
+-- borne en Python les lignes deja comptees dans GEO_USAGE.TOTAL : sans lui,
+-- chaque execution recompterait tout l'historique des sessions.
+CREATE TABLE IF NOT EXISTS geo_usage_watermark(
+    ID INT PRIMARY KEY DEFAULT 1,
+    LAST_PROCESSED_AT TIMESTAMP NOT NULL DEFAULT '1970-01-01',
+    CONSTRAINT CK_GEO_USAGE_WATERMARK_SINGLETON CHECK (ID = 1)
+);
+
+INSERT INTO geo_usage_watermark (ID) VALUES (1) ON CONFLICT (ID) DO NOTHING;
+
+
 -- Compteurs cumulatifs "depuis toujours" (remplace v_gf_total_requests,
 -- v_gf_status_requests, v_gf_status_200/404/500/503, v_gf_requests_with_key,
 -- v_gf_max_ratelimit_used, v_gf_avg_ratelimit_used, v_gf_max_ratelimit_limit,
