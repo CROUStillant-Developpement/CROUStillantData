@@ -283,17 +283,20 @@ CREATE TABLE IF NOT EXISTS archive_log(
 
 
 -- Normalisation des routes : le path loggue est concret
--- (/v1/restaurants/1234/menu/2026-09-09), on remplace les segments variables
+-- (/v1/restaurants/1234/menu/09-09-2026), on remplace les segments variables
 -- par des placeholders pour obtenir la route de l'API
 -- (/v1/restaurants/<code>/menu/<date>). IMMUTABLE : utilisable dans un index
 -- fonctionnel si le besoin s'en fait sentir, et evaluee une fois par ligne
 -- lors de l'agregation.
+--
+-- Les dates de l'API sont au format DD-MM-YYYY (Rules.date cote
+-- CROUStillantAPI) ; YYYY-MM-DD est aussi reconnu.
 CREATE OR REPLACE FUNCTION normalize_route(P TEXT) RETURNS TEXT AS $$
     SELECT regexp_replace(
                regexp_replace(
                    regexp_replace(
                        COALESCE(P, ''),
-                       '/[0-9]{4}-[0-9]{2}-[0-9]{2}(?=/|$)', '/<date>', 'g'
+                       '/([0-9]{2}-[0-9]{2}-[0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2})(?=/|$)', '/<date>', 'g'
                    ),
                    '/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?=/|$)', '/<uuid>', 'g'
                ),

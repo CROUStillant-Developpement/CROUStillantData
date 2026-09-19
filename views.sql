@@ -596,7 +596,7 @@ DROP VIEW IF EXISTS v_gf_daily_status_pending;
 -- Une ligne par jour (Europe/Paris). Les compteurs sont ceux du dernier
 -- releve joignable de la journee (evolution), l'uptime est la part des
 -- releves ou le bot repondait online/degraded. Materialisee (rafraichie via
--- referential.json) : lue par CROUStillantAPI (/v1/bot/stats/history) et
+-- referential.json) : lue par CROUStillantAPI (/v1/stats/bot/history) et
 -- Grafana, sans rescanner bot_stats a chaque requete.
 CREATE MATERIALIZED VIEW IF NOT EXISTS bot_stats_daily AS
 SELECT
