@@ -2,7 +2,7 @@
     *  CROUStillantData - schema.sql
     *  Created by: CROUStillant Développement
     *  Created on: 05/09/2026
-    *  Updated on: 09/09/2026
+    *  Updated on: 18/09/2026
     *  Description: Tables permanentes pour les statistiques de requests_logs.
     *
     *  requests_logs est partitionnee par mois et vouee a etre archivee
@@ -300,3 +300,31 @@ CREATE OR REPLACE FUNCTION normalize_route(P TEXT) RETURNS TEXT AS $$
                '/[0-9]+(?=/|$)', '/<code>', 'g'
            );
 $$ LANGUAGE SQL IMMUTABLE;
+
+
+-- Historique des statistiques du bot Discord CROUStillantBot, collectees
+-- toutes les 5 minutes par bot_stats_main.py (voir bot_stats.py) sur
+-- l'endpoint dPyStatus du bot (GET /status).
+--
+-- Une ligne par releve, y compris quand le bot est injoignable
+-- (STATUS = 'offline', compteurs NULL) : c'est ce qui permet de calculer
+-- l'uptime, un trou dans la serie ne distinguerait pas une panne du bot
+-- d'une panne du collecteur.
+CREATE TABLE IF NOT EXISTS bot_stats(
+    ID BIGSERIAL PRIMARY KEY,
+    CREATED_AT TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- online / degraded (shards hors ligne) / starting / offline
+    STATUS VARCHAR(10) NOT NULL,
+    LATENCY_MS REAL,
+    UPTIME_S DOUBLE PRECISION,
+    GUILDS INT,
+    USERS INT,
+    CACHED_USERS INT,
+    CHANNELS INT,
+    SHARDS INT,
+    -- Reponse dPyStatus complete (detail des salons, des shards, extras)
+    PAYLOAD JSONB,
+    CONSTRAINT CK_BOT_STATS_STATUS CHECK (STATUS IN ('online', 'degraded', 'starting', 'offline'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_stats_created_at ON bot_stats (CREATED_AT);

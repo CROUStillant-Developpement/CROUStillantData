@@ -2,7 +2,7 @@
     *  CROUStillant - views.sql
     *  Created by: CROUStillant Développement
     *  Created on: 06/11/2025
-    *  Updated on: 09/09/2026
+    *  Updated on: 18/09/2026
     *  Description: SQL database scheme for the CROUStillant project
 ***************************************************************/
 
@@ -587,3 +587,30 @@ WHERE ID = 1;
 -- deux sources de verite ; no-op si la base ne les a jamais eus.
 DROP VIEW IF EXISTS v_gf_daily_status;
 DROP VIEW IF EXISTS v_gf_daily_status_pending;
+
+
+-- ================================================
+-- BOT • Statistiques du bot Discord (bot_stats)
+-- ================================================
+--
+-- Une ligne par jour (Europe/Paris). Les compteurs sont ceux du dernier
+-- releve joignable de la journee (evolution), l'uptime est la part des
+-- releves ou le bot repondait online/degraded. Materialisee (rafraichie via
+-- referential.json) : lue par CROUStillantAPI (/v1/bot/stats/history) et
+-- Grafana, sans rescanner bot_stats a chaque requete.
+CREATE MATERIALIZED VIEW IF NOT EXISTS bot_stats_daily AS
+SELECT
+    (CREATED_AT AT TIME ZONE 'Europe/Paris')::date AS day,
+    COUNT(*) AS samples,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE STATUS IN ('online', 'degraded')) / COUNT(*), 2) AS uptime,
+    ROUND(AVG(LATENCY_MS)::numeric, 2) AS latency_ms,
+    (ARRAY_AGG(GUILDS ORDER BY CREATED_AT DESC) FILTER (WHERE GUILDS IS NOT NULL))[1] AS guilds,
+    (ARRAY_AGG(USERS ORDER BY CREATED_AT DESC) FILTER (WHERE USERS IS NOT NULL))[1] AS users,
+    (ARRAY_AGG(CHANNELS ORDER BY CREATED_AT DESC) FILTER (WHERE CHANNELS IS NOT NULL))[1] AS channels,
+    (ARRAY_AGG(SHARDS ORDER BY CREATED_AT DESC) FILTER (WHERE SHARDS IS NOT NULL))[1] AS shards
+FROM bot_stats
+GROUP BY 1
+WITH DATA;
+
+-- Index unique requis par REFRESH MATERIALIZED VIEW CONCURRENTLY (worker.py)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_stats_daily_day ON bot_stats_daily (day);

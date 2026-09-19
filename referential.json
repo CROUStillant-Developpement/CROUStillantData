@@ -3,5 +3,6 @@
     "v_gf_tache_requetes_jour": 30,
     "v_gf_tache_nb_jour": 30,
     "v_gf_tache_delta_jour": 30,
-    "v_gf_bucket_count": 5
+    "v_gf_bucket_count": 5,
+    "bot_stats_daily": 30
 }

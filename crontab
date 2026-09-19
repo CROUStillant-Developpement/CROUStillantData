@@ -9,5 +9,8 @@
 # Every 30 minutes during the night (21:00-5:59)
 0,30 21-23,0-5 * * * uv run --project /CROUStillantData /CROUStillantData/__main__.py >> /proc/1/fd/1 2>> /proc/1/fd/2
 
+# Discord bot stats snapshot (dPyStatus), every 5 minutes day and night
+*/5 * * * * uv run --project /CROUStillantData /CROUStillantData/bot_stats_main.py >> /proc/1/fd/1 2>> /proc/1/fd/2
+
 # Archive old requests_logs partitions to the distant database, once a day
 15 3 * * * uv run --project /CROUStillantData /CROUStillantData/archive_main.py >> /proc/1/fd/1 2>> /proc/1/fd/2
