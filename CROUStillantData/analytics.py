@@ -14,7 +14,8 @@ class Analytics:
         pool: Pool,
         analytics_pool: Pool,
         websites_ids: list[int],
-        photon_api: str,
+        geo_api_url: str,
+        geo_api_key: str | None = None,
     ) -> None:
         """
         Initialise the Analytics class.
@@ -27,14 +28,18 @@ class Analytics:
         :type analytics_pool: Pool
         :param websites_ids: List of website IDs to process.
         :type websites_ids: list[int]
-        :param photon_api: The Photon API URL for geocoding.
-        :type photon_api: str
+        :param geo_api_url: Base URL of the GeoPol instance used for
+            geocoding (e.g. https://geo.bayfield.dev).
+        :type geo_api_url: str
+        :param geo_api_key: GeoPol API key, sent in the X-API-Key header.
+        :type geo_api_key: str | None
         """
         self.session = session
         self.pool = pool
         self.analytics_pool = analytics_pool
         self.websites_ids = websites_ids
-        self.photon_api_url = photon_api
+        self.geo_search_url = f"{geo_api_url.rstrip('/')}/v1/search"
+        self.geo_headers = {"X-API-Key": geo_api_key} if geo_api_key else {}
 
         self.df_pool = None
         self.df_analytics_pool = None
@@ -138,8 +143,7 @@ class Analytics:
         distinct_cities = {
             record.get("city")
             for record in self.df_analytics_pool
-            # Limiting to France for now
-            # Our Geodecode API is only configured for France for the moment
+            # Limite a la France : la recherche GeoPol est filtree sur FR
             if record.get("city") and record.get("country") == "FR"
         }
 
@@ -155,45 +159,64 @@ class Analytics:
 
         return known_cities
 
+    # Couches GeoPol essayees dans l'ordre : d'abord les communes, puis
+    # les lieux-dits / quartiers si la ville Umami n'est pas une commune.
+    # Jamais de recherche sans couche : "Paris" ne doit pas tomber sur une
+    # rue de Paris ailleurs en France.
+    GEO_LAYERS = ("city", "locality,district")
+
     async def geodecode(self, city: str) -> bool:
         """
-        Geodecode a city to get its geographical information.
+        Geodecode a French city with GeoPol and insert it into GEO_DATA.
 
         :param city: The city name to geodecode.
         :type city: str
         :return: True if the city was geodecoded and inserted into GEO_DATA.
         :rtype: bool
         """
-        try:
-            async with self.session.get(
-                self.photon_api_url, params={"q": str(city), "limit": 1}
-            ) as response:
-                data = await response.json()
-        except Exception as e:
-            print(f"Error geodecoding city {city}: {e}")
-            return False
+        for layers in self.GEO_LAYERS:
+            try:
+                async with self.session.get(
+                    self.geo_search_url,
+                    params={
+                        "q": str(city),
+                        "limit": 1,
+                        "countries": "fr",
+                        "layers": layers,
+                        "lang": "fr",
+                    },
+                    headers=self.geo_headers,
+                ) as response:
+                    if response.status != 200:
+                        print(
+                            f"Error geodecoding city {city}: HTTP {response.status} {await response.text()}"
+                        )
+                        return False
+                    data = await response.json()
+            except Exception as e:
+                print(f"Error geodecoding city {city}: {e}")
+                return False
 
-        if not data["features"]:
-            return False
+            if data.get("results"):
+                await self.insert_geo_data(data["results"][0], city)
+                return True
 
-        await self.insert_geo_data(data["features"][0], city)
-        return True
+        return False
 
-    async def insert_geo_data(self, feature: dict, city: str) -> None:
+    async def insert_geo_data(self, result: dict, city: str) -> None:
         """
         Insert geographical data into the GEO_DATA table.
 
-        :param feature: The feature dictionary from the photon API response.
-        :type feature: dict
+        :param result: A result from GeoPol's /v1/search response.
+        :type result: dict
         :param city: The city name.
         :type city: str
         """
-        properties = feature.get("properties", {})
-        country_code = properties.get("countrycode", "")
-        region = properties.get("state", "")
-        coordinates = feature.get("geometry", {}).get("coordinates", [0.0, 0.0])
-        longitude = coordinates[0]
-        latitude = coordinates[1]
+        address = result.get("address") or {}
+        country_code = address.get("countryCode") or ""
+        region = address.get("state") or ""
+        latitude = result.get("lat", 0.0)
+        longitude = result.get("lon", 0.0)
 
         print(
             f"Inserting GEO data for city: {city}, Country: {country_code}, Region: {region}, Lat: {latitude}, Lon: {longitude}"

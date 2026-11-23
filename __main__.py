@@ -62,7 +62,8 @@ async def main():
         pool=pool,
         analytics_pool=analytics_pool,
         websites_ids=environ["WEBSITES_IDS"].split(","),
-        photon_api=environ.get("PHOTON_API_URL"),
+        geo_api_url=environ["GEOPOL_API_URL"],
+        geo_api_key=environ.get("GEOPOL_API_KEY"),
     )
 
     await analytics.process()
